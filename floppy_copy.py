@@ -18,7 +18,8 @@ def find_pictures(source_dir_path: pathlib.Path) -> list[pathlib.Path]:
     Returns:
         List of paths to detected pictures
     """
-    pictures_paths = list(source_dir_path.glob("*.jpg", case_sensitive=False))
+    pictures_paths = list(source_dir_path.glob("*.jpg", case_sensitive=False)) +\
+        list(source_dir_path.glob("*.mpg", case_sensitive=False))
     logging.info(f"{len(pictures_paths)} pictures found")
 
     return pictures_paths
