@@ -112,6 +112,13 @@ def copy_files(
         for path in fail_paths:
             logging.error(path)
 
+    try:
+        for path in success_paths:
+            os.chown(path, 1000, 1000)
+    except Exception as e:
+        e.add_note("Could not set ownership to the target files, continuing anyway.")
+        logging.warning(e)
+
     return success_paths, fail_paths
 
 
