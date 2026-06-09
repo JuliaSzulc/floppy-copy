@@ -18,8 +18,10 @@ def find_pictures(source_dir_path: pathlib.Path) -> list[pathlib.Path]:
     Returns:
         List of paths to detected pictures
     """
-    pictures_paths = list(source_dir_path.glob("*.jpg", case_sensitive=False)) +\
-        list(source_dir_path.glob("*.mpg", case_sensitive=False))
+    pictures_paths = (
+        list(source_dir_path.glob("*.jpg", case_sensitive=False))
+        + list(source_dir_path.glob("*.mpg", case_sensitive=False))
+    )
     logging.info(f"{len(pictures_paths)} pictures found")
 
     return pictures_paths
@@ -28,7 +30,7 @@ def find_pictures(source_dir_path: pathlib.Path) -> list[pathlib.Path]:
 def create_target_filenames(
     target_dir_path: pathlib.Path,
     pictures_paths: list[pathlib.Path],
-) -> dict[pathlib.Path: str]:
+) -> dict[pathlib.Path, str]:
     """
     Creates alternative target names of files ('YYMMDD_hhmmss'). Handles duplicates.
 
@@ -37,8 +39,7 @@ def create_target_filenames(
         pictures_paths: Source paths of pictures on the floppy disk.
 
     Returns:
-        Dictionary of source paths mapped to their new filenames with extensions (not
-            paths)
+        Dictionary of source paths mapped to their new filenames with extensions
     """
     def extract_timestamp(path: pathlib.Path) -> str:
         """
@@ -48,26 +49,29 @@ def create_target_filenames(
             path: Path to the file
 
         Returns:
-            name of the new file (formatted timestamp)
+            Name of the new file (formatted timestamp)
         """
         try:
             file_mtime = path.stat().st_mtime
-        except AttributeError as e:
-            e.add_note(f"Metadata of {path} does not include required timestamp")
-            raise
+        except (AttributeError, OSError) as e:
+            raise RuntimeError(
+                f"Metadata of {path} does not include required timestamp"
+            ) from e
 
         return datetime.datetime.fromtimestamp(file_mtime).strftime("%y%m%d_%H%M%S")
 
-    target_dir_files = [path.name for path in target_dir_path.iterdir()]
-    new_names = {}
+    new_names: dict[pathlib.Path, str] = {}
 
     for filepath in pictures_paths:
         timestamp = extract_timestamp(filepath)
         extension = filepath.suffix
-        new_filename = timestamp + extension
+        new_filename = f"{timestamp}{extension}"
 
         i = 0
-        while new_filename in new_names.values() or new_filename in target_dir_files:
+        while (
+            (target_dir_path / new_filename).exists()
+            or new_filename in new_names.values()
+        ):
             i += 1
             new_filename = f"{timestamp}_{i}{extension}"
 
@@ -77,48 +81,51 @@ def create_target_filenames(
 
 
 def copy_files(
-    target_filenames: dict[pathlib.Path: str],
+    target_filenames: dict[pathlib.Path, str],
     target_dir_path: pathlib.Path,
 ) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
     """
     Copies detected pictures from the floppy disk to the target path under new names.
+    Ensures files are owned by the original user, even if the script is run with sudo.
 
     Args:
-        target_filenames: Dictionary of source paths mapped to their new filenames with
-            extensions (not paths)
-        target_dir_path: target_dir_path: Target directory where pictures are copied.
+        target_filenames: Dictionary of source paths mapped to their new filenames
+        target_dir_path: Target directory where pictures are copied.
 
     Returns:
         Two lists - one with successfully copied paths and other with failures.
     """
-    success_paths, fail_paths = [], []
+    success_paths: list[pathlib.Path] = []
+    fail_paths: list[pathlib.Path] = []
+
+    # Determine the real user's UID/GID (not root)
+    user_uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    user_gid = int(os.environ.get("SUDO_GID", os.getgid()))
 
     for filepath, new_name in target_filenames.items():
+        new_path = target_dir_path / new_name
         try:
-            success_paths.append(shutil.copy2(filepath, (target_dir_path / new_name)))
+            success_paths.append(shutil.copy2(filepath, new_path))
+
+            # Dynamically restore ownership to the original user if run as root
+            if os.geteuid() == 0:
+                try:
+                    os.chown(new_path, user_uid, user_gid)
+                except OSError as e:
+                    logging.warning(f"Could not set ownership for {new_path}: {e}")
+
         except Exception as e:
-            logging.error(e)
+            logging.error(f"Failed to copy {filepath}: {e}")
             fail_paths.append(filepath)
 
     logging.info(
-        f"Successfully copied {len(success_paths)}/{len(target_filenames)} files:"
+        f"Successfully copied {len(success_paths)}/{len(target_filenames)} files."
     )
-    for path in success_paths:
-        logging.info(path)
 
     if fail_paths:
-        logging.error(
-            f"Failed to copy {len(fail_paths)}/{len(target_filenames)} files:"
-        )
+        logging.error(f"Failed to copy {len(fail_paths)}/{len(target_filenames)} files")
         for path in fail_paths:
-            logging.error(path)
-
-    try:
-        for path in success_paths:
-            os.chown(path, 1000, 1000)
-    except Exception as e:
-        e.add_note("Could not set ownership to the target files, continuing anyway.")
-        logging.warning(e)
+            logging.error(f"  - {path}")
 
     return success_paths, fail_paths
 
@@ -130,25 +137,27 @@ def wipe_disk(disk_path: pathlib.Path) -> None:
     Args:
         disk_path: Path to the disk directory
     """
+    files_to_remove = [str(path) for path in disk_path.glob("*")]
     logging.warning(f"Everything in {disk_path} will be removed.")
-    logging.warning("Directory contents:")
-    logging.warning(f"{"\n".join(os.listdir(disk_path))}")
-
+    logging.warning(f"Files to remove:\n" + "\n".join(files_to_remove))
 
     if input("Type 'yes' to continue: ").lower() == "yes":
         for path in disk_path.glob("*"):
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
-            logging.info(f"{path} removed")
-        pass
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                logging.info(f"{path} removed")
+            except Exception as e:
+                logging.error(f"Failed to remove {path}: {e}")
+        logging.info("Files have been removed successfully.")
     else:
-        logging.info("Nothing has been removed")
+        logging.info("Nothing has been removed.")
 
 
 def parse_args():
-    def correct_path(path: str) -> pathlib.Path:
+    def _correct_path(path: str) -> pathlib.Path:
         """
         Wrapper for path arguments type.
 
@@ -181,18 +190,18 @@ def parse_args():
         By default the script does not clear the floppy after successfully copying files.
         When you run it with `--wipe` (`-w`) flag, make sure you review the list of files to
         be deleted, which is displayed before the removal.""",
-        formatter_class=argparse.RawTextHelpFormatter
+        formatter_class=argparse.RawTextHelpFormatter,
     )
 
     parser.add_argument(
         "source",
-        type=correct_path,
+        type=_correct_path,
         help="Path to the mounted floppy drive"
     )
 
     parser.add_argument(
         "target",
-        type=correct_path,
+        type=_correct_path,
         help="Target directory for the pictures"
     )
 
@@ -207,7 +216,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.INFO)
+    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
 
     args = parse_args()
 
@@ -215,14 +224,18 @@ if __name__ == "__main__":
     target_dir_path = args.target
     wipe_flag = args.wipe
 
-    # Check for root privileges
-    if wipe_flag and os.getuid() != 0:
+    if wipe_flag and os.geteuid() != 0:
         raise PermissionError(
-            "To wipe the floppy disk the script has to be run with root privileges. " +
-            "Try running again with `sudo`."
+            "To wipe the floppy disk, the script must be run with root privileges. "
+            "Run again with `sudo`"
         )
 
     pictures_paths = find_pictures(source_dir_path)
+
+    if not pictures_paths:
+        logging.info("No pictures found on the source disk. Exiting.")
+        exit(0)
+
     target_filenames = create_target_filenames(target_dir_path, pictures_paths)
 
     _, fail_paths = copy_files(target_filenames, target_dir_path)
